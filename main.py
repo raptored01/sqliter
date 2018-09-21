@@ -11,10 +11,12 @@ class Connection:
 
     @property
     def tables(self):
-        tables = self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        if tables:
-            for table_name in tables:
-                self.tables.append(table_name["name"])
+        table_rows = self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        tables = []
+        if table_rows:
+            for table_row in table_rows:
+                tables.append(table_row["name"])
+        return tables
 
     def table(self, name):
         return Table(self, name)
