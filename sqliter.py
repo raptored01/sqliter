@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime
 
 
 from exceptions import (
@@ -8,34 +9,11 @@ from exceptions import (
     NoSuchField,
 )
 
-from field_types import FieldTypes
+from field_types import FIELD_TYPES, Fields
+from utils import is_valid_field_name, clean_kwargs, scrub
 
 
-FIELD_TYPES = {
-    "TEXT": FieldTypes.text,
-    "INTEGER": FieldTypes.integer,
-    "REAL": FieldTypes.real,
-    "DATE": FieldTypes.date,
-    "DATETIME": FieldTypes.datetime,
-    "BLOB": FieldTypes.blob,
-    "BOOLEAN": FieldTypes.boolean,
-}
-
-
-def scrub(text):
-    return "".join(c for c in text if c.isalnum() or c is "_")
-
-
-def clean_kwargs(**kwargs):
-    cleaned_kwargs = {}
-    for key, value in kwargs.items():
-        cleaned_key = scrub(key)
-        cleaned_kwargs[cleaned_key] = value
-    return cleaned_kwargs
-
-
-def is_valid_field_name(text):
-    return not text.startswith("__")
+__all__ = ["Database"]
 
 
 class Database:
@@ -52,12 +30,8 @@ class Database:
 
     @property
     def tables(self):
-        table_rows = self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        tables = []
-        if table_rows:
-            for table_row in table_rows:
-                tables.append(table_row["name"])
-        return tables
+        sql = """SELECT name FROM sqlite_master WHERE type='table'"""
+        return [row["name"] for row in self.cursor.execute(sql)]
 
     def table(self, name):
         if name in self.tables:
@@ -65,19 +39,32 @@ class Database:
         else:
             raise NoSuchTable(name)
 
+    def create_table(self, table_name, **kwargs):
+        table_name = scrub(table_name)
+        fields = ", ".join(field.sql(key) for key, field in kwargs.items())
+        create_statement = f"""
+        CREATE TABLE {table_name}(
+        {fields}
+        )
+        """
+        print(create_statement)
+        with self.connection:
+            self.cursor.execute(create_statement)
+        return Table(self, table_name)
+
 
 class Table:
 
-    def __init__(self, __connection, __name):
-        self._connection = __connection.connection
+    def __init__(self, __database, __name):
+        self._connection = __database.connection
         self.__cursor = self._connection.cursor()
         self.name = __name
-        self.fields = self.__get_fields()
+        self.fields, self.pk = self.__get_fields()
 
     def all(self, *columns):
         cols = ", ".join(columns) or "*"
         for row in self.__cursor.execute(f"""SELECT {cols} FROM {self.name}"""):
-            yield Entry(self, row["id"], **row)
+            yield Entry(self, row[self.pk], **row)
 
     def create(self, **kwargs):
         kwargs = clean_kwargs(**kwargs)
@@ -131,11 +118,12 @@ class Table:
             return entry
 
     def clear(self):
-        self.__cursor.execute(
-            f"""
-            DELETE FROM {self.name}
-            """
-        )
+        with self._connection:
+            self.__cursor.execute(
+                f"""
+                DELETE FROM {self.name}
+                """
+            )
 
     @property
     def columns(self):
@@ -171,9 +159,12 @@ class Table:
 
     def __get_fields(self):
         fields = {pragma["name"]: pragma for pragma in self.pragma}
+        pk = None
         for name, pragma in fields.items():
             pragma["type"] = FIELD_TYPES[pragma["type"]]
-        return fields
+            if pragma["pk"] == 1:
+                pk = name
+        return fields, pk
 
 
 class Entry:
@@ -195,7 +186,7 @@ class Entry:
         row = self.__cursor.execute(
             f"""
             SELECT * FROM {self.__table.name}
-            WHERE id=?
+            WHERE {self.__table.pk}=?
             """, (self.__pk, )
         ).fetchone()
         if row is None:
@@ -238,8 +229,3 @@ class Entry:
     def __repr__(self):
         return str({key: self.__dict__[key] for key in self.__table.columns})
 
-
-connection = Database("na2akn.db")
-documents = connection.table("documents")
-doc = documents.get(pk=1)
-print(doc)
