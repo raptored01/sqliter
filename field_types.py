@@ -1,7 +1,6 @@
 import datetime
 
-from exceptions import UnknownFieldType
-from utils import scrub
+from exceptions import ForeignKeyError
 
 
 class FieldTypes:
@@ -89,10 +88,21 @@ class Field:
         self.fk = fk
         if self.fk:
             assert "references" in kwargs, "must provide reference for Foreign Key"
-            assert isinstance(kwargs["references"], tuple), "references param must be tuple of (table_name, column_name)"
-            assert len(kwargs["references"]) == 2, "references param must be tuple of (table_name, column_name)"
+            try:
+                self.references = kwargs["references"].name, kwargs["references"].pk
+            except AttributeError:
+                try:
+                    self.references = kwargs["references"]["table"], kwargs["references"]["column"]
+                except KeyError:
+                    try:
+                        self.references = kwargs["references"][0], kwargs["references"][1]
+                    except (IndexError, TypeError):
+                        raise ForeignKeyError("ForeignKey reference must be either:\n"
+                                              "\tTable instance\n"
+                                              "\t{table: table_name, column: column_name} dict\n"
+                                              "\t(table_name, column_name) tuple\n"
+                                              f"Received: {type(kwargs['references'])}")
             assert "on_delete" in kwargs, "must provide action for on_delete event"
-            self.references = kwargs["references"]
             self.on_delete = kwargs["on_delete"]
 
     def sql(self, name):

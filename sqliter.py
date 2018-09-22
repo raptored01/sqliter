@@ -1,12 +1,9 @@
 import sqlite3
-from datetime import datetime
-
 
 from exceptions import (
     InvalidFieldName,
     NoSuchTable,
     NoSuchEntry,
-    NoSuchField,
 )
 
 from field_types import FIELD_TYPES, Fields
@@ -14,6 +11,10 @@ from utils import is_valid_field_name, clean_kwargs, scrub
 
 
 __all__ = ["Database"]
+
+
+import os
+os.system("rm test.db")
 
 
 class Database:
@@ -49,16 +50,22 @@ class Database:
         """
         with self.connection:
             self.cursor.execute(create_statement)
-        return Table(self, table_name)
+        fk = {}
+        for key, field in kwargs.items():
+            if hasattr(field, "references"):
+                fk[key] = field.references
+        return Table(self, table_name, **fk)
 
 
 class Table:
 
-    def __init__(self, __database, __name):
-        self._connection = __database.connection
-        self.__cursor = self._connection.cursor()
+    def __init__(self, __database, __name, **fk):
+        self.database = __database
+        self.connection = __database.connection
+        self.__cursor = self.connection.cursor()
         self.name = __name
         self.fields, self.pk = self.__get_fields()
+        self.fk = fk
 
     def all(self, *columns):
         cols = ", ".join(columns) or "*"
@@ -67,57 +74,57 @@ class Table:
 
     def create(self, **kwargs):
         kwargs = clean_kwargs(**kwargs)
-
+        for k, v in kwargs.items():
+            if isinstance(v, Entry):
+                kwargs[k] = v._pk
         cols = ", ".join(kwargs.keys())
         values = ", ".join(f":{kw}" for kw in kwargs.keys())
-
         sql = f"""
-        INSERT INTO {self.name} (
-            {cols}
-        ) VALUES ({values})
-        """
-        with self._connection:
+                INSERT INTO {self.name} (
+                    {cols}
+                ) VALUES ({values})
+                """
+        with self.connection:
             self.__cursor.execute(sql, kwargs)
-            entry = Entry(self, self.__cursor.lastrowid)
-            entry._instanciate()
+            entry = self.get(rowid=self.__cursor.lastrowid)
             return entry
 
     def create_or_replace(self, **kwargs):
         kwargs = clean_kwargs(**kwargs)
-
+        for k, v in kwargs.items():
+            if isinstance(v, Entry):
+                kwargs[k] = v._pk
         cols = ", ".join(kwargs.keys())
         values = ", ".join(f":{kw}" for kw in kwargs.keys())
-
         sql = f"""
-        INSERT REPLACE INTO {self.name} (
-            {cols}
-        ) VALUES ({values})
-        """
-        with self._connection:
+                INSERT OR REPLACE INTO {self.name} (
+                    {cols}
+                ) VALUES ({values})
+                """
+        with self.connection:
             self.__cursor.execute(sql, kwargs)
-            entry = Entry(self, self.__cursor.lastrowid)
-            entry._instanciate()
+            entry = self.get(rowid=self.__cursor.lastrowid)
             return entry
 
     def create_or_ignore(self, **kwargs):
         kwargs = clean_kwargs(**kwargs)
-
+        for k, v in kwargs.items():
+            if isinstance(v, Entry):
+                kwargs[k] = v._pk
         cols = ", ".join(kwargs.keys())
         values = ", ".join(f":{kw}" for kw in kwargs.keys())
-
         sql = f"""
-        INSERT REPLACE INTO {self.name} (
-            {cols}
-        ) VALUES ({values})
-        """
-        with self._connection:
-            self.__cursor.execute(sql, kwargs)  # TODO check if created or ignored
-            entry = Entry(self, self.__cursor.lastrowid)
-            entry._instanciate()
+                INSERT OR IGNORE INTO {self.name} (
+                    {cols}
+                ) VALUES ({values})
+                """
+        with self.connection:
+            self.__cursor.execute(sql, kwargs)
+            entry = self.get(rowid=self.__cursor.lastrowid)
             return entry
 
     def clear(self):
-        with self._connection:
+        with self.connection:
             self.__cursor.execute(
                 f"""
                 DELETE FROM {self.name}
@@ -126,7 +133,7 @@ class Table:
 
     @property
     def columns(self):
-        cursor = self._connection.execute(f"SELECT * FROM {self.name}")
+        cursor = self.connection.execute(f"SELECT * FROM {self.name}")
         return list(map(lambda x: x[0], cursor.description))
 
     def filter(self, **kwargs):
@@ -136,6 +143,7 @@ class Table:
     def get(self, **kwargs):
         assert len(kwargs) > 0, "You must provide **kwargs"
         kwargs = clean_kwargs(**kwargs)
+        print(self.name, kwargs)
         if "pk" in kwargs:
             kwargs["id"] = kwargs["pk"]
             kwargs.pop("pk")
@@ -147,8 +155,7 @@ class Table:
         row = self.__cursor.execute(sql, kwargs).fetchone()
         if row is None:
             raise NoSuchEntry
-        entry = Entry(self, row["id"])
-        entry._instanciate()
+        entry = Entry(self, row[self.pk], **row)
         return entry
 
     @property
@@ -170,32 +177,32 @@ class Entry:
 
     def __init__(self, __table, __pk, **kwargs):
         self.__table = __table
-        self.__connection = self.__table._connection
+        self.__database = self.__table.database
+        self.__connection = self.__table.connection
         self.__cursor = self.__connection.cursor()
-        self.__pk = __pk
+        self._pk = __pk
+        self.__instanciate(**kwargs)
 
-        for key in kwargs.keys():
+    def __instanciate(self, **kwargs):
+        fk = self.__table.fk
+        for key, value in kwargs.items():
             if not is_valid_field_name(key):
                 raise InvalidFieldName(key)
-            # if not key in self.__table.columns:
-                # raise NoSuchField(key)
-            setattr(self, key, kwargs[key])
+            if key in fk:
+                tname, cname = fk[key]
+                value = self.__database.table(tname).get(**{cname: value})
+            setattr(self, key, value)
 
-    def _instanciate(self):
+    def __reload(self):
         row = self.__cursor.execute(
             f"""
             SELECT * FROM {self.__table.name}
             WHERE {self.__table.pk}=?
-            """, (self.__pk, )
+            """, (self._pk,)
         ).fetchone()
         if row is None:
-            raise NoSuchEntry(self.__table.name, self.__pk)
-
-        for key in row.keys():
-            if not is_valid_field_name(key):
-                raise InvalidFieldName(key)
-            value = self.__table.fields[key]["type"](row[key])
-            setattr(self, key, value)
+            raise NoSuchEntry(self.__table.name, self._pk)
+        self.__instanciate(**row)
 
     def __is_protected_name(self, name):
         protected_name = f"_{self.__class__.__name__}__"
@@ -203,26 +210,74 @@ class Entry:
 
     def save(self):
         kwargs = {}
-        for key in self.__table.fields.keys():
-            kwargs[key] = self.__dict__[key]
-        kwargs[self.__table.pk] = self.__pk
+        for key, value in self.__table.fields.items():
+            if isinstance(self.__dict__[key], Entry):
+                kwargs[key] = self.__dict__[key]._pk
+            else:
+                kwargs[key] = self.__dict__[key]
+        kwargs[self.__table.pk] = self._pk
+        # print(kwargs)
         values = ", ".join([f"{key}=:{key}" for key in kwargs if key != "id"])
         sql = f"""
             UPDATE {self.__table.name}
             SET {values}
             WHERE {self.__table.pk}=:{self.__table.pk}
             """
-        print(sql)
         with self.__connection:
             self.__cursor.execute(sql, kwargs)
 
     def delete(self):
-        self.__cursor.execute(
-            f"""
-            DELETE FROM {self.__table.name}
-            WHERE {self.__table.pk}=?
-            """, (self.__pk, )
-        )
+        with self.__connection:
+            self.__cursor.execute(
+                f"""
+                DELETE FROM {self.__table.name}
+                WHERE {self.__table.pk}=?
+                """, (self._pk,)
+            )
 
     def __repr__(self):
         return str({key: self.__dict__[key] for key in self.__table.columns})
+
+
+# connect
+my_db = Database("test.db")
+
+# create a new table without getting its instance
+my_db.create_table(
+    "owners",
+    id=Fields.Integer(pk=True),
+    name=Fields.Text(null=False),
+)
+
+# get an existing table
+owners = my_db.table("owners")
+
+# create new entries
+frank = owners.create(name="Frank")
+josh = owners.create(name="Josh")
+jenny = owners.create(name="Jenny")
+anna = owners.create(name="Anna")
+
+# create a new table getting its instance
+dogs = my_db.create_table(
+    "dogs",
+    id=Fields.Integer(pk=True),
+    name=Fields.Text(null=False),
+    age=Fields.Integer(null=False),
+    owner=Fields.ForeignKey(references=owners, on_delete=Fields.CASCADE)
+)
+
+# create new entries
+dogs.create(name="Fido", age=3, owner=frank)
+dogs.create(name="Jo", age=1, owner=2)
+dogs.create(name="Luna", age=5, owner=jenny)
+dogs.create(name="Dina", age=1, owner=4)
+
+
+for dog in dogs.all():
+    print(dog)
+    dog.owner = frank
+    dog.save()
+    print(dog)
+    print()
+

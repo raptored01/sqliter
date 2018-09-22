@@ -17,5 +17,10 @@ class NoSuchEntry(Exception):
 class NoSuchField(Exception):
     pass
 
+
 class UnknownFieldType(Exception):
+    pass
+
+
+class ForeignKeyError(Exception):
     pass
