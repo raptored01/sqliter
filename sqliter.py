@@ -47,7 +47,6 @@ class Database:
         {fields}
         )
         """
-        print(create_statement)
         with self.connection:
             self.cursor.execute(create_statement)
         return Table(self, table_name)
@@ -203,18 +202,17 @@ class Entry:
         return name.startswith(protected_name)
 
     def save(self):
-        valid_fields = self.__table.fields.keys()
         kwargs = {}
-        for key in self.__dict__.keys():
-            if not self.__is_protected_name(key) and key not in valid_fields:
-                raise NoSuchField(key)
+        for key in self.__table.fields.keys():
             kwargs[key] = self.__dict__[key]
+        kwargs[self.__table.pk] = self.__pk
         values = ", ".join([f"{key}=:{key}" for key in kwargs if key != "id"])
         sql = f"""
             UPDATE {self.__table.name}
             SET {values}
-            WHERE id=:id
+            WHERE {self.__table.pk}=:{self.__table.pk}
             """
+        print(sql)
         with self.__connection:
             self.__cursor.execute(sql, kwargs)
 
@@ -222,10 +220,9 @@ class Entry:
         self.__cursor.execute(
             f"""
             DELETE FROM {self.__table.name}
-            WHERE id=?
-            """, (self.id, )
+            WHERE {self.__table.pk}=?
+            """, (self.__pk, )
         )
 
     def __repr__(self):
         return str({key: self.__dict__[key] for key in self.__table.columns})
-
