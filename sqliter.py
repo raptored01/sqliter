@@ -13,11 +13,7 @@ from field_types import TYPE_MAP, FIELD_TYPE_ENFORCERS, Fields
 from utils import is_valid_field_name, clean_kwargs, scrub, types_match
 
 
-__all__ = ["Database"]
-
-
-import os
-os.system("rm test.db")
+__all__ = ["Database", "Fields"]
 
 
 class Database:
@@ -192,8 +188,12 @@ class Entry:
                 raise InvalidFieldName(key)
             if key in foreign_keys:
                 table, to = foreign_keys[key]["table"], foreign_keys[key]["to"]
+                if isinstance(value, Entry):
+                    value = value._pk
                 value = self.__database.table(table).get(**{to: value})
-            setattr(self, key, self.__table.fields[key]["enforce_type"](value))
+                setattr(self, key, value)
+            else:
+                setattr(self, key, self.__table.fields[key]["enforce_type"](value))
 
     def __reload(self):
         row = self.__cursor.execute(
@@ -239,7 +239,7 @@ class Entry:
             )
 
     def __repr__(self):
-        return str({key: self.__dict__[key] for key in self.__table.columns})
+        return f"<Entry {str({key: self.__dict__[key] for key in self.__table.columns})} >"
 
 
 class QuerySet:
