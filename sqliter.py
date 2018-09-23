@@ -132,8 +132,8 @@ class Table:
         with self.connection:
             self.__cursor.execute(f"DROP TABLE {self.name}")
 
-    def filter(self, **kwargs):
-        return QuerySet(self, **kwargs)
+    def filter(self, operator="AND", **kwargs):
+        return QuerySet(self, operator=operator, **kwargs)
 
     def get(self, **kwargs):
         assert len(kwargs) > 0, "You must provide **kwargs"
@@ -262,7 +262,7 @@ class QuerySet:
         "icontains": lambda x: f"%{x}%"
     }
 
-    def __init__(self, __table, operator="and", **kwargs):
+    def __init__(self, __table, operator="AND", **kwargs):
         self.__table = __table
         self.__connection = self.__table.connection
         self.__cursor = self.__connection.cursor()
