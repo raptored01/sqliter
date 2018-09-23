@@ -24,3 +24,11 @@ class UnknownFieldType(Exception):
 
 class ForeignKeyError(Exception):
     pass
+
+
+class MismatchingTypes(Exception):
+    pass
+
+
+class UnknownOperation(Exception):
+    pass

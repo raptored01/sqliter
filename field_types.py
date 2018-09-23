@@ -37,7 +37,7 @@ class FieldTypes:
         return bool(value)
 
 
-FIELD_TYPES = {
+FIELD_TYPE_ENFORCERS = {
     "TEXT": FieldTypes.text,
     "INTEGER": FieldTypes.integer,
     "REAL": FieldTypes.real,

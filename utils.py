@@ -12,3 +12,9 @@ def clean_kwargs(**kwargs):
 
 def is_valid_field_name(text):
     return not text.startswith("__")
+
+
+def types_match(o, key, fields):
+    if isinstance(o, list) and len(o):
+        return all(isinstance(x, fields[key]["type"]) for x in o)
+    return isinstance(o, fields[key]["type"])

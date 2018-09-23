@@ -2,12 +2,15 @@ import sqlite3
 
 from exceptions import (
     InvalidFieldName,
+    MismatchingTypes,
+    NoSuchField,
     NoSuchTable,
     NoSuchEntry,
+    UnknownOperation,
 )
 
-from field_types import FIELD_TYPES, Fields
-from utils import is_valid_field_name, clean_kwargs, scrub
+from field_types import TYPE_MAP, FIELD_TYPE_ENFORCERS, Fields
+from utils import is_valid_field_name, clean_kwargs, scrub, types_match
 
 
 __all__ = ["Database"]
@@ -24,6 +27,10 @@ class Database:
         self.connection = sqlite3.connect(__db_name)
         self.connection.row_factory = sqlite3.Row
         self.cursor = self.connection.cursor()
+        with self.connection:
+            self.cursor.execute("PRAGMA FOREIGN_KEYS = ON")
+            # for some weird reason, this is needed
+            # otherwise the foreign keys are not enforced
 
     def raw(self, sql):
         self.cursor.execute(sql)
@@ -40,113 +47,103 @@ class Database:
         else:
             raise NoSuchTable(name)
 
-    def create_table(self, table_name, **kwargs):
+    def __create_table(self, table_name, condition, **kwargs):
         table_name = scrub(table_name)
         fields = ", ".join(field.sql(key) for key, field in kwargs.items())
         create_statement = f"""
-        CREATE TABLE {table_name}(
+        CREATE TABLE {condition} {table_name}(
         {fields}
         )
         """
         with self.connection:
             self.cursor.execute(create_statement)
-        fk = {}
-        for key, field in kwargs.items():
-            if hasattr(field, "references"):
-                fk[key] = field.references
-        return Table(self, table_name, **fk)
+        return Table(self, table_name)
+
+    def create_table(self, table_name, **kwargs):
+        return self.__create_table(table_name, "", **kwargs)
+
+    def create_table_if_not_exists(self, table_name, **kwargs):
+        return self.__create_table(table_name, "IF NOT EXISTS", **kwargs)
 
 
 class Table:
 
-    def __init__(self, __database, __name, **fk):
+    # TODO: alter
+
+    def __init__(self, __database, __name):
         self.database = __database
         self.connection = __database.connection
         self.__cursor = self.connection.cursor()
         self.name = __name
         self.fields, self.pk = self.__get_fields()
-        self.fk = fk
+        self.columns = list(self.fields.keys())
+        self.foreign_keys = self.__get_foreign_keys()
 
-    def all(self, *columns):
-        cols = ", ".join(columns) or "*"
-        for row in self.__cursor.execute(f"""SELECT {cols} FROM {self.name}"""):
-            yield Entry(self, row[self.pk], **row)
+    def all(self):
+        return QuerySet(self)
+
+    def __create(self, condition, bulk=False, **kwargs):
+        # todo: auto-add pk if not provided
+        kwargs = clean_kwargs(**kwargs)
+        for k, v in kwargs.items():
+            if isinstance(v, Entry):
+                kwargs[k] = v._pk
+        cols = ", ".join(kwargs.keys())
+        values = ", ".join(f":{kw}" for kw in kwargs.keys())
+        sql = f"""
+        INSERT {condition} INTO {self.name} (
+            {cols}
+        ) VALUES ({values})
+        """
+        if not bulk:
+            with self.connection:
+                self.__cursor.execute(sql, kwargs)
+                entry = self.get(rowid=self.__cursor.lastrowid)
+                return entry
+        else:
+            self.__cursor.execute(sql, kwargs)
 
     def create(self, **kwargs):
-        kwargs = clean_kwargs(**kwargs)
-        for k, v in kwargs.items():
-            if isinstance(v, Entry):
-                kwargs[k] = v._pk
-        cols = ", ".join(kwargs.keys())
-        values = ", ".join(f":{kw}" for kw in kwargs.keys())
-        sql = f"""
-                INSERT INTO {self.name} (
-                    {cols}
-                ) VALUES ({values})
-                """
-        with self.connection:
-            self.__cursor.execute(sql, kwargs)
-            entry = self.get(rowid=self.__cursor.lastrowid)
-            return entry
+        return self.__create(condition="", **kwargs)
 
     def create_or_replace(self, **kwargs):
-        kwargs = clean_kwargs(**kwargs)
-        for k, v in kwargs.items():
-            if isinstance(v, Entry):
-                kwargs[k] = v._pk
-        cols = ", ".join(kwargs.keys())
-        values = ", ".join(f":{kw}" for kw in kwargs.keys())
-        sql = f"""
-                INSERT OR REPLACE INTO {self.name} (
-                    {cols}
-                ) VALUES ({values})
-                """
-        with self.connection:
-            self.__cursor.execute(sql, kwargs)
-            entry = self.get(rowid=self.__cursor.lastrowid)
-            return entry
+        return self.__create(condition="OR REPLACE", **kwargs)
 
     def create_or_ignore(self, **kwargs):
-        kwargs = clean_kwargs(**kwargs)
-        for k, v in kwargs.items():
-            if isinstance(v, Entry):
-                kwargs[k] = v._pk
-        cols = ", ".join(kwargs.keys())
-        values = ", ".join(f":{kw}" for kw in kwargs.keys())
-        sql = f"""
-                INSERT OR IGNORE INTO {self.name} (
-                    {cols}
-                ) VALUES ({values})
-                """
+        return self.__create(condition="OR IGNORE", **kwargs)
+
+    def __bulk_create(self, condition, iterable):
+        assert hasattr(iterable, '__iter__'), f"You must provide an iterable of dicts, not {type(iterable)}"
         with self.connection:
-            self.__cursor.execute(sql, kwargs)
-            entry = self.get(rowid=self.__cursor.lastrowid)
-            return entry
+            for kwargs in iterable:
+                assert isinstance(kwargs, dict), f"You must provide an iterable of dicts, not of {type(kwargs)}"
+                self.__create(condition, bulk=True, **kwargs)
+
+    def bulk_create(self, iterable):
+        self.__bulk_create("", iterable)
+
+    def bulk_create_or_replace(self, iterable):
+        self.__bulk_create("OR REPLACE", iterable)
+
+    def bulk_create_or_ignore(self, iterable):
+        self.__bulk_create("OR IGNORE", iterable)
 
     def clear(self):
         with self.connection:
-            self.__cursor.execute(
-                f"""
-                DELETE FROM {self.name}
-                """
-            )
+            self.__cursor.execute(f"DELETE FROM {self.name}")
 
-    @property
-    def columns(self):
-        cursor = self.connection.execute(f"SELECT * FROM {self.name}")
-        return list(map(lambda x: x[0], cursor.description))
+    def drop(self):
+        with self.connection:
+            self.__cursor.execute(f"DROP TABLE {self.name}")
 
     def filter(self, **kwargs):
-        # TODO
-        pass
+        return QuerySet(self, **kwargs)
 
     def get(self, **kwargs):
         assert len(kwargs) > 0, "You must provide **kwargs"
         kwargs = clean_kwargs(**kwargs)
-        print(self.name, kwargs)
         if "pk" in kwargs:
-            kwargs["id"] = kwargs["pk"]
-            kwargs.pop("pk")
+            kwargs[self.pk] = kwargs.pop("pk")
         conditions = " AND ".join(f"{key}=:{key}" for key in kwargs)
         sql = f"""
             SELECT * FROM {self.name}
@@ -159,18 +156,23 @@ class Table:
         return entry
 
     @property
-    def pragma(self):
+    def __table_info(self):
         return [dict(row)
                 for row in self.__cursor.execute(f"PRAGMA table_info({self.name})")]
 
     def __get_fields(self):
-        fields = {pragma["name"]: pragma for pragma in self.pragma}
+        fields = {pragma["name"]: pragma for pragma in self.__table_info}
         pk = None
         for name, pragma in fields.items():
-            pragma["type"] = FIELD_TYPES[pragma["type"]]
+            pragma["enforce_type"] = FIELD_TYPE_ENFORCERS[pragma["type"]]
+            pragma["type"] = TYPE_MAP[pragma["type"]]
             if pragma["pk"] == 1:
                 pk = name
         return fields, pk
+
+    def __get_foreign_keys(self):
+        return {row['from']: dict(row)
+                for row in self.__cursor.execute(f"PRAGMA foreign_key_list({self.name})")}
 
 
 class Entry:
@@ -184,14 +186,14 @@ class Entry:
         self.__instanciate(**kwargs)
 
     def __instanciate(self, **kwargs):
-        fk = self.__table.fk
+        foreign_keys = self.__table.foreign_keys
         for key, value in kwargs.items():
             if not is_valid_field_name(key):
                 raise InvalidFieldName(key)
-            if key in fk:
-                tname, cname = fk[key]
-                value = self.__database.table(tname).get(**{cname: value})
-            setattr(self, key, value)
+            if key in foreign_keys:
+                table, to = foreign_keys[key]["table"], foreign_keys[key]["to"]
+                value = self.__database.table(table).get(**{to: value})
+            setattr(self, key, self.__table.fields[key]["enforce_type"](value))
 
     def __reload(self):
         row = self.__cursor.execute(
@@ -204,20 +206,21 @@ class Entry:
             raise NoSuchEntry(self.__table.name, self._pk)
         self.__instanciate(**row)
 
-    def __is_protected_name(self, name):
-        protected_name = f"_{self.__class__.__name__}__"
-        return name.startswith(protected_name)
-
     def save(self):
+        """
+        Updates itself writing changes to the db
+        """
         kwargs = {}
-        for key, value in self.__table.fields.items():
-            if isinstance(self.__dict__[key], Entry):
-                kwargs[key] = self.__dict__[key]._pk
+        for key in self.__table.fields:
+            if isinstance(self.__dict__[key], Entry):   # if a value it's another Entry object
+                kwargs[key] = self.__dict__[key]._pk    # we translate it to its primary key
             else:
-                kwargs[key] = self.__dict__[key]
+                kwargs[key] = self.__dict__[key]        # else we write it as it is
+            if not types_match(kwargs[key], key, self.__table.fields):
+                raise MismatchingTypes(f"Received {type(kwargs[key])}, Expected {self.__table.fields[key]['type']}")
+
         kwargs[self.__table.pk] = self._pk
-        # print(kwargs)
-        values = ", ".join([f"{key}=:{key}" for key in kwargs if key != "id"])
+        values = ", ".join([f"{key}=:{key}" for key in kwargs if key != "{self.__table.pk}"])
         sql = f"""
             UPDATE {self.__table.name}
             SET {values}
@@ -239,45 +242,121 @@ class Entry:
         return str({key: self.__dict__[key] for key in self.__table.columns})
 
 
-# connect
-my_db = Database("test.db")
+class QuerySet:
 
-# create a new table without getting its instance
-my_db.create_table(
-    "owners",
-    id=Fields.Integer(pk=True),
-    name=Fields.Text(null=False),
-)
+    __QUERY_DICT = {
+        "equals": lambda x: f"= :__{x}",
+        "gt": lambda x: f"> :__{x}",
+        "lt": lambda x: f"< :__{x}",
+        "gte": lambda x: f">= :__{x}",
+        "lte": lambda x: f"<= :__{x}",
+        "like": lambda x: f"LIKE :__{x}",
+        "ilike": lambda x: f"LIKE :__{x}",
+        "contains": lambda x: f"LIKE :__{x}",
+        "icontains": lambda x: f"LIKE :__{x}",
+        "in": lambda x: f"IN [:__{x}]",
+    }
 
-# get an existing table
-owners = my_db.table("owners")
+    __VALUES_DICT = {
+        "ilike": lambda x: f"%{x}%",
+        "icontains": lambda x: f"%{x}%"
+    }
 
-# create new entries
-frank = owners.create(name="Frank")
-josh = owners.create(name="Josh")
-jenny = owners.create(name="Jenny")
-anna = owners.create(name="Anna")
+    def __init__(self, __table, operator="and", **kwargs):
+        self.__table = __table
+        self.__connection = self.__table.connection
+        self.__cursor = self.__connection.cursor()
+        assert operator.lower() in ("and", "or"), f"Unknown operator: {operator}"
+        self.__operator = operator.upper()
+        self.__query = {}
+        self.__kwargs = {}
+        self.__orderby = []
 
-# create a new table getting its instance
-dogs = my_db.create_table(
-    "dogs",
-    id=Fields.Integer(pk=True),
-    name=Fields.Text(null=False),
-    age=Fields.Integer(null=False),
-    owner=Fields.ForeignKey(references=owners, on_delete=Fields.CASCADE)
-)
+        kwargs = clean_kwargs(**kwargs)
+        for key, value in kwargs.items():
+            field_query = key.split("__")
+            if len(field_query) == 2:
+                field, query = field_query
+                if query not in self.__QUERY_DICT:
+                    raise UnknownOperation(query)
+            else:
+                field, query = key, "equals"
+            if field == "pk":
+                field = self.__table.pk
+            if field not in self.__table.fields:
+                raise NoSuchField(field)
+            if not types_match(value, field, self.__table.fields):
+                raise MismatchingTypes(f"{field}: expected {self.__table.fields[field]['type']}, got {type(value)}")
+            self.__query[field] = self.__QUERY_DICT[query]
+            if isinstance(value, list) or isinstance(value, tuple):
+                value = ", ".join(str(x) for x in value)
+            self.__kwargs[f"__{field}"] = self.__VALUES_DICT.get(query, lambda x: x)(value)
 
-# create new entries
-dogs.create(name="Fido", age=3, owner=frank)
-dogs.create(name="Jo", age=1, owner=2)
-dogs.create(name="Luna", age=5, owner=jenny)
-dogs.create(name="Dina", age=1, owner=4)
+    def delete(self):
+        with self.__connection:
+            self.__cursor.execute(f"DELETE FROM {self.__table.name} {self.__condition_statement}", self.__kwargs)
 
+    def order_by(self, field: str):
+        order = "ASC"
+        if field.startswith("-"):
+            order = "DESC"
+        field = field.replace("-", "")
+        if field not in self.__table.fields:
+            raise NoSuchField(field)
+        self.__orderby.append((field, order))
+        return self
 
-for dog in dogs.all():
-    print(dog)
-    dog.owner = frank
-    dog.save()
-    print(dog)
-    print()
+    def update(self, **kwargs):
+        for key, value in kwargs.items():
+            if key not in self.__table.fields:
+                raise NoSuchField(key)
+            if isinstance(value, Entry):  # if a value it's another Entry object
+                kwargs[key] = value._pk  # we translate it to its primary key
+            if not types_match(value, key, self.__table.fields):
+                raise MismatchingTypes(f"Received {type(value)}, Expected {self.__table.fields[key]['type']}")
 
+        values = ", ".join([f"{key}=:{key}" for key in kwargs if key != "self.__table.pk"])
+        sql = f"""
+            UPDATE {self.__table.name}
+            SET {values}
+            {self.__condition_statement}
+            """
+        kwargs.update(**self.__kwargs)
+        with self.__connection:
+            self.__cursor.execute(sql, kwargs)
+
+    def first(self):
+        row = self.__cursor.execute(self.__select_statement, self.__kwargs).fetchone()
+        if row is None:
+            return None
+        return Entry(self.__table, row[self.__table.pk], **row)
+
+    @property
+    def __condition_statement(self):
+        conditions = []
+        if self.__query:
+            for key, query in self.__query.items():
+                conditions.append(f"{key} {query(key)}")
+            conditions_statement = f" {self.__operator} ".join(conditions)
+            return f"WHERE {conditions_statement}"
+        else:
+            return ""
+
+    @property
+    def __orderby_statement(self):
+        orderby_statements = ", ".join(f"{field} {order}" for field, order in self.__orderby)
+        if orderby_statements:
+            return f"ORDER BY {orderby_statements}"
+        else:
+            return ""
+
+    @property
+    def __select_statement(self):
+        return f"""SELECT * FROM {self.__table.name}
+               {self.__condition_statement}
+               {self.__orderby_statement}
+               """
+
+    def __iter__(self):
+        for row in self.__cursor.execute(self.__select_statement, self.__kwargs):
+            yield Entry(self.__table, row[self.__table.pk], **row)
