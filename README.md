@@ -59,6 +59,7 @@ A simple wrapper for Python's SQLite3
     frank = persons.create(name="Frank", birthday=datetime.date(1985, 6, 1))
     alice = persons.create(name="Alice", birthday=datetime.date(1995, 4, 22))
     anna = persons.create(name="Anna", birthday=datetime.date(1970, 5, 12))
+    # N.B.: types are enforced
     
 ### create multiple entries at once
     dog_names = ["Max", "Charlie", "Bella", "Lucy", "Molly", "Rocky"]
@@ -87,7 +88,11 @@ A simple wrapper for Python's SQLite3
 ### loop through the QuerySet
     for dog in dogs.filter(id__lte=5).order_by("-age"):
         print(dog)
-    
+
+### filter the entries specifying the operator
+    dogs.filter(operator="OR", name__icontains="y", age__lte=5)
+    # N.B.: default operator: AND    
+
 ### update a QuerySet
     dogs_older_than_five.update(name="Old dog")
     
